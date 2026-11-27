@@ -1,7 +1,6 @@
 """各数据源报文解析测试（使用实测报文，不依赖网络）。"""
 
 from for_a.models import SymbolError
-from for_a.sources.cninfo import CninfoSource
 from for_a.sources.eastmoney import parse_eastmoney_payload
 from for_a.sources.sina import parse_sina_line
 from for_a.sources.tencent import parse_tencent_line
@@ -125,6 +124,38 @@ def test_eastmoney_parser_scales_decimals():
 
 def test_eastmoney_parser_handles_null_data():
     assert parse_eastmoney_payload({"data": None}, "600519.SH") is None
+
+
+def test_eastmoney_parser_rejects_misaligned_payload():
+    """镜像偶尔返回字段值错位的报文，必须判定为无效而不是当成真实行情。"""
+    payload = {
+        "rc": 0,
+        "data": {
+            "f43": 230947.61,
+            "f47": 219633762376.29,
+            "f57": 11.9015685357,
+            "f58": 271204740541.63,
+            "f60": 1577095.18,
+            "f86": 1,
+        },
+    }
+    assert parse_eastmoney_payload(payload, "600519.SH") is None
+
+
+def test_eastmoney_parser_rejects_missing_price():
+    payload = {"data": {"f57": "600519", "f58": "贵州茅台", "f60": 146900}}
+    assert parse_eastmoney_payload(payload, "600519.SH") is None
+
+
+def test_eastmoney_parser_rejects_zero_price():
+    payload = {"data": {"f43": 0, "f57": "600519", "f58": "贵州茅台"}}
+    assert parse_eastmoney_payload(payload, "600519.SH") is None
+
+
+def test_eastmoney_parser_rejects_batch_shaped_payload():
+    """批量端点的 data 结构是 diff 列表，单价解析器不该把它当成行情。"""
+    payload = {"data": {"total": 2, "diff": [{"f43": 147890, "f57": "600519"}]}}
+    assert parse_eastmoney_payload(payload, "600519.SH") is None
 
 
 def test_three_sources_agree_on_intraday_reference_fields():

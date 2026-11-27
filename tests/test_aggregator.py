@@ -1,6 +1,6 @@
 """多源交叉校验与规则引擎测试（不依赖网络）。"""
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pytest
 
@@ -86,6 +86,34 @@ def test_primary_source_failure_falls_back():
     result = agg.fetch(["600519.SH"])["600519.SH"]
     assert result.ok
     assert result.quote.source == "sina"
+
+
+def test_stuck_primary_source_is_demoted():
+    """主源时间戳卡住时必须降级到最新的源，并在结果上标记出来。"""
+    now = datetime.now()
+    stuck = _quote(price=1472.0, quote_time=now - timedelta(seconds=600), source="eastmoney")
+    fresh = _quote(price=1478.9, quote_time=now, source="tencent")
+    agg = Aggregator(client=None, primary="eastmoney", verify=["tencent"])
+    agg._sources["eastmoney"] = _FakeSource({"600519.SH": stuck})
+    agg._sources["tencent"] = _FakeSource({"600519.SH": fresh})
+    result = agg.fetch(["600519.SH"])["600519.SH"]
+    assert result.stale
+    assert result.stale_source == "eastmoney"
+    assert result.stale_lag > 500
+    assert result.quote.source == "tencent"
+    assert result.quote.price == 1478.9
+
+
+def test_fresh_primary_source_is_kept():
+    now = datetime.now()
+    agg = _aggregator(
+        {"600519.SH": _quote(price=1472.98, quote_time=now, source="eastmoney")},
+        {"tencent": {"600519.SH": _quote(price=1472.99, quote_time=now, source="tencent")}},
+    )
+    result = agg.fetch(["600519.SH"])["600519.SH"]
+    assert not result.stale
+    assert result.stale_source == ""
+    assert result.quote.source == "eastmoney"
 
 
 @pytest.fixture()

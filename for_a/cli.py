@@ -14,9 +14,9 @@ import sys
 from typing import List
 
 from .aggregator import Aggregator
-from .config import Config, load_config
+from .config import load_config
 from .http import HttpClient
-from .models import normalize_code
+from .models import SymbolError, normalize_code
 from .sources import build_source
 from .sources.cninfo import CninfoSource
 from .watch import Watcher
@@ -40,10 +40,22 @@ def _parse_codes(raw: str) -> List[str]:
 
 
 def cmd_quote(args: argparse.Namespace) -> int:
-    codes = _parse_codes(args.codes)
+    try:
+        codes = _parse_codes(args.codes)
+    except SymbolError as exc:
+        print(f"证券代码非法: {exc}", file=sys.stderr)
+        return 2
     if not codes:
         print("未指定 --codes", file=sys.stderr)
         return 2
+
+    tolerance = 0.005
+    if args.config:
+        try:
+            tolerance = load_config(args.config).sources.divergence_tolerance
+        except (FileNotFoundError, SymbolError, ValueError) as exc:
+            print(f"配置错误: {exc}", file=sys.stderr)
+            return 2
 
     client = HttpClient(timeout=args.timeout, min_interval=args.interval)
     source_names = [args.source] if args.source else ["eastmoney", "tencent", "sina"]
@@ -51,6 +63,7 @@ def cmd_quote(args: argparse.Namespace) -> int:
         client=client,
         primary=source_names[0],
         verify=source_names[1:],
+        divergence_tolerance=tolerance,
     )
     aggregated = aggregator.fetch(codes)
 
@@ -65,7 +78,7 @@ def cmd_quote(args: argparse.Namespace) -> int:
         assert quote is not None
         stamp = quote.quote_time.strftime("%H:%M:%S") if quote.quote_time else "-"
         flag = ""
-        if item.divergence > 0.005:
+        if item.divergence > tolerance:
             flag = f"  ⚠分歧 {item.divergence * 100:.2f}%"
         print(
             f"{quote.code:<12}{quote.name:<10}{quote.price:>10.2f}"
@@ -125,7 +138,14 @@ def cmd_announcements(args: argparse.Namespace) -> int:
 
 
 def cmd_watch(args: argparse.Namespace) -> int:
-    config = load_config(args.config)
+    try:
+        config = load_config(args.config)
+    except FileNotFoundError as exc:
+        print(f"配置文件不存在: {exc}", file=sys.stderr)
+        return 2
+    except (SymbolError, ValueError) as exc:
+        print(f"配置错误: {exc}", file=sys.stderr)
+        return 2
     if args.codes:
         config.watchlist = _parse_codes(args.codes)
     if args.interval:
@@ -151,6 +171,7 @@ def build_parser() -> argparse.ArgumentParser:
     quote = sub.add_parser("quote", help="拉取一次行情快照")
     quote.add_argument("--codes", required=True, help="逗号分隔的代码，如 600519,000001")
     quote.add_argument("--source", help="指定主数据源：tencent / sina / eastmoney")
+    quote.add_argument("--config", help="配置文件路径（读取分歧阈值等配置）")
     quote.add_argument("--timeout", type=float, default=10.0)
     quote.add_argument("--interval", type=float, default=0.5, help="最小请求间隔（秒）")
     quote.set_defaults(func=cmd_quote)

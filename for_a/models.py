@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union
 
 # 代码前缀 -> 交易所。必须按前缀长度倒序匹配，否则 "60" 会吃掉 "688"。
 _MARKET_BY_PREFIX: Tuple[Tuple[str, str], ...] = (
@@ -81,7 +81,7 @@ def resolve_market(digits: str) -> str:
     raise SymbolError(f"无法推断交易所: {digits}")
 
 
-def normalize_code(raw: str) -> str:
+def normalize_code(raw: Union[str, int]) -> str:
     """把各种写法统一成 ``600519.SH`` 形式。
 
     支持 ``600519`` / ``sh600519`` / ``600519.sh`` / ``SH600519``。
@@ -234,6 +234,8 @@ class AggregatedQuote:
     """多源交叉校验后的结果。
 
     ``quotes`` 保存每个源的原始快照，``quote`` 是选定的主源结果。
+    ``stale`` 表示选中的数据来自一个卡住的源（主源时间戳落后时会被降级替换），
+    ``stale_source`` / ``stale_lag`` 记录卡住的源与落后秒数。
     """
 
     code: str
@@ -242,6 +244,8 @@ class AggregatedQuote:
     quotes: Dict[str, Quote] = field(default_factory=dict)
     divergence: float = 0.0
     stale: bool = False
+    stale_source: str = ""
+    stale_lag: float = 0.0
     errors: Dict[str, str] = field(default_factory=dict)
 
     @property

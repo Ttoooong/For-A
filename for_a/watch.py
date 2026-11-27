@@ -6,18 +6,26 @@ import logging
 import signal
 import time
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import List, Optional
 
 from .aggregator import Aggregator
 from .alerts import build_alerters
 from .config import Config
 from .http import HttpClient
-from .models import Alert, Announcement, normalize_code
+from .models import Alert
 from .rules import RuleContext, build_announcement_rules, build_rules
 from .sources.cninfo import CninfoSource
 from .storage import Storage
 
 logger = logging.getLogger(__name__)
+
+# 这些告警自带状态机/时间窗去重，送到 Watcher 就代表「这是一个新事件」
+_SELF_DEDUPED_RULES = frozenset(
+    {"price_change", "limit", "turnover", "divergence", "source_stale"}
+)
+
+# 多源分歧的提示窗口：同一标的 15 分钟内只提示一次
+_DIVERGENCE_WINDOW_SECONDS = 900
 
 
 class Watcher:
@@ -25,7 +33,8 @@ class Watcher:
 
     def __init__(self, config: Config) -> None:
         self.config = config
-        self.codes = [normalize_code(code) for code in config.watchlist]
+        # 自选股代码已在 Config.__post_init__ 归一化，这里直接使用
+        self.codes = list(config.watchlist)
         self.client = HttpClient(
             timeout=config.sources.timeout,
             retries=config.sources.retries,
@@ -65,19 +74,31 @@ class Watcher:
             quote = item.quote
             assert quote is not None
 
-            for alert in self._divergence_alerts(item):
+            for alert in self._stale_alerts(item):
                 if self._accept(alert):
                     fresh.append(alert)
 
-            for rule in self.rules:
-                for alert in rule.evaluate(quote, ctx):
+            # 主源卡住时价格已经过期：既不做价格类判断，也不拿它去算分歧——
+            # 卡住本身就是分歧的成因，再报一次分歧只是噪声
+            if not item.stale:
+                for alert in self._divergence_alerts(item):
                     if self._accept(alert):
                         fresh.append(alert)
+
+                for rule in self.rules:
+                    for alert in rule.evaluate(quote, ctx):
+                        if self._accept(alert):
+                            fresh.append(alert)
 
             # 必须在规则评估之后再落盘，否则放量规则读到的就是本次数据
             self.storage.save_quote(quote)
 
         fresh.extend(self._check_announcements(ctx))
+
+        # 一轮结束统一落盘：避免每个标的都 fsync 一次
+        self.storage.prune_alerts()
+        self.storage.prune_states()
+        self.storage.commit()
 
         if fresh:
             for alerter in self.alerters:
@@ -85,10 +106,19 @@ class Watcher:
         return fresh
 
     def _divergence_alerts(self, item) -> List[Alert]:
-        """多源价格分歧超阈值时提示，避免在错数据上做决策。"""
+        """多源价格分歧超阈值时提示，避免在错数据上做决策。
+
+        同一标的在一个时间窗内只提示一次——分歧值本身会随行情微动，
+        按数值去重会每轮都刷一条。
+        """
         tolerance = self.config.sources.divergence_tolerance
         if item.divergence <= tolerance:
             return []
+        bucket = int(datetime.now().timestamp() // _DIVERGENCE_WINDOW_SECONDS)
+        state_key = f"divergence:{item.code}"
+        if self.storage.get_state(state_key) == f"bucket:{bucket}":
+            return []
+        self.storage.set_state(state_key, f"bucket:{bucket}")
         prices = {name: q.price for name, q in item.quotes.items() if q.price}
         detail = "、".join(f"{name}={price}" for name, price in prices.items())
         alert = Alert(
@@ -102,6 +132,38 @@ class Watcher:
             level="warning",
             quote_time=item.quote.quote_time if item.quote else None,
             payload={"divergence": item.divergence, "prices": prices},
+        )
+        return [alert]
+
+    def _stale_alerts(self, item) -> List[Alert]:
+        """主源行情卡住时的提示（状态机：卡住时推一次，恢复后可再次推送）。"""
+        state_key = f"source_stale:{item.code}"
+        previous = self.storage.get_state(state_key)
+        if not item.stale:
+            if previous:
+                self.storage.set_state(state_key, "")
+            return []
+        if previous == "stale":
+            return []
+        self.storage.set_state(state_key, "stale")
+        stale_source = item.stale_source or "?"
+        trusted = item.quote.source if item.quote else "?"
+        message = (
+            f"{item.name}({item.code}) 主数据源 {stale_source} 行情时间戳落后 "
+            f"{item.stale_lag:.0f} 秒，已改用 {trusted} 的数据，本轮跳过价格类规则"
+        )
+        alert = Alert(
+            rule="source_stale",
+            code=item.code,
+            name=item.name,
+            message=message,
+            level="warning",
+            quote_time=item.quote.quote_time if item.quote else None,
+            payload={
+                "stale_source": stale_source,
+                "stale_lag": item.stale_lag,
+                "trusted_source": trusted,
+            },
         )
         return [alert]
 
@@ -149,7 +211,13 @@ class Watcher:
     # ---------- 去重 ----------
 
     def _accept(self, alert: Alert) -> bool:
-        """告警去重：同一条告警在窗口期内只投递一次。"""
+        """告警去重。
+
+        规则自带状态机的（穿越阈值、时间窗）送来即代表新事件；其余按唯一键
+        只投递一次（公告按公告号，放量按 5 分钟桶）。
+        """
+        if alert.rule in _SELF_DEDUPED_RULES:
+            return True
         key = self._alert_key(alert)
         if self.storage.seen_alert(key):
             return False
@@ -161,17 +229,8 @@ class Watcher:
         if alert.rule == "announcement_keyword":
             ann_id = alert.payload.get("announcement_id") or alert.payload.get("title")
             return f"announcement:{alert.code}:{ann_id}"
-        if alert.rule == "price_change":
-            return f"price_change:{alert.code}:{round(float(alert.payload.get('change_pct', 0)), 1)}"
-        if alert.rule == "limit":
-            return f"limit:{alert.code}:{alert.payload.get('state')}"
-        if alert.rule == "turnover":
-            return f"turnover:{alert.code}:{int(float(alert.payload.get('turnover', 0)))}"
         if alert.rule == "volume_surge":
-            bucket = int(datetime.now().timestamp() // 300)
-            return f"volume_surge:{alert.code}:{bucket}"
-        if alert.rule == "divergence":
-            return f"divergence:{alert.code}:{round(float(alert.payload.get('divergence', 0)), 3)}"
+            return f"volume_surge:{alert.code}:{alert.payload.get('bucket')}"
         return f"{alert.rule}:{alert.code}"
 
     # ---------- 常驻循环 ----------
@@ -205,4 +264,5 @@ class Watcher:
 
     def close(self) -> None:
         self.aggregator.close()
+        self.client.close()
         self.storage.close()

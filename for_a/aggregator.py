@@ -7,7 +7,8 @@
 from __future__ import annotations
 
 import logging
-from typing import Dict, Iterable, List
+from datetime import datetime
+from typing import Dict, Iterable, List, Optional
 
 from .http import HttpClient
 from .models import AggregatedQuote, Quote
@@ -76,9 +77,18 @@ class Aggregator:
                 errors=dict(errors),
             )
 
+        # 找出时间戳最新的源，作为主源缺失/卡住时的兜底
+        newest: Optional[datetime] = None
+        newest_quote: Optional[Quote] = None
+        for quote in quotes.values():
+            if quote.quote_time is None:
+                continue
+            if newest is None or quote.quote_time > newest:
+                newest = quote.quote_time
+                newest_quote = quote
+
         primary_quote = quotes.get(self.primary)
-        chosen = primary_quote or next(iter(quotes.values()))
-        name = chosen.name
+        chosen = primary_quote or newest_quote or next(iter(quotes.values()))
 
         prices = [q.price for q in quotes.values() if q.price]
         divergence = 0.0
@@ -88,26 +98,38 @@ class Aggregator:
 
         # 某个源的时间戳明显落后于其它源，说明该源卡住了
         stale = False
-        times = [q.quote_time for q in quotes.values() if q.quote_time]
-        if times:
-            newest = max(times)
+        stale_source = ""
+        stale_lag = 0.0
+        if newest is not None:
             for quote in quotes.values():
-                if quote.quote_time and (newest - quote.quote_time).total_seconds() > self.stale_seconds:
+                if quote.quote_time is None:
+                    continue
+                lag = (newest - quote.quote_time).total_seconds()
+                if lag <= self.stale_seconds:
+                    continue
+                logger.warning(
+                    "数据源 %s 行情时间戳落后 %s 秒（最新 %s）",
+                    quote.source or "?",
+                    lag,
+                    newest,
+                )
+                # 卡住的是主源时降级到时间最新的源，避免在过期数据上做决策
+                if quote is primary_quote:
                     stale = True
-                    logger.warning(
-                        "数据源 %s 行情时间戳落后 %s 秒（最新 %s）",
-                        quote.source,
-                        (newest - quote.quote_time).total_seconds(),
-                        newest,
-                    )
+                    stale_source = quote.source or self.primary
+                    stale_lag = lag
+                    if newest_quote is not None:
+                        chosen = newest_quote
 
         return AggregatedQuote(
             code=code,
-            name=name,
+            name=chosen.name,
             quote=chosen,
             quotes=quotes,
             divergence=divergence,
             stale=stale,
+            stale_source=stale_source,
+            stale_lag=stale_lag,
             errors=dict(errors),
         )
 

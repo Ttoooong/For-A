@@ -7,7 +7,7 @@ name = "for-a"
 version = "0.1.0"
 description = "A 股信息监控平台 —— 多源行情、公告与舆情采集，规则引擎驱动告警"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 license = { text = "MIT" }
 dependencies = [
     "requests>=2.31.0",

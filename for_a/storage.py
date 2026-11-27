@@ -48,6 +48,12 @@ class Storage:
                 publish_time TEXT,
                 created_at  TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS rule_states (
+                key        TEXT PRIMARY KEY,
+                state      TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_alerts_created ON alerts(created_at);
             """
         )
         self.conn.commit()
@@ -65,14 +71,37 @@ class Storage:
             "INSERT OR REPLACE INTO alerts (key, created_at) VALUES (?, ?)",
             (key, datetime.now().isoformat(timespec="seconds")),
         )
-        self.conn.commit()
 
     def prune_alerts(self, keep_days: int = 7) -> int:
         cutoff = (
             datetime.now() - timedelta(days=keep_days)
         ).isoformat(timespec="seconds")
         cursor = self.conn.execute("DELETE FROM alerts WHERE created_at < ?", (cutoff,))
-        self.conn.commit()
+        return cursor.rowcount
+
+    # ---------- 规则状态机 ----------
+
+    def get_state(self, key: str) -> Optional[str]:
+        """读取规则状态；``None`` 表示从未触发过。"""
+        row = self.conn.execute(
+            "SELECT state FROM rule_states WHERE key = ?", (key,)
+        ).fetchone()
+        return row["state"] if row is not None else None
+
+    def set_state(self, key: str, state: str) -> None:
+        self.conn.execute(
+            "INSERT OR REPLACE INTO rule_states (key, state, updated_at) VALUES (?, ?, ?)",
+            (key, state, datetime.now().isoformat(timespec="seconds")),
+        )
+
+    def prune_states(self, keep_days: int = 7) -> int:
+        """清理已复位（状态为空）的行。"""
+        cutoff = (
+            datetime.now() - timedelta(days=keep_days)
+        ).isoformat(timespec="seconds")
+        cursor = self.conn.execute(
+            "DELETE FROM rule_states WHERE state = '' AND updated_at < ?", (cutoff,)
+        )
         return cursor.rowcount
 
     # ---------- 行情快照 ----------
@@ -97,7 +126,6 @@ class Storage:
                 datetime.now().isoformat(timespec="seconds"),
             ),
         )
-        self.conn.commit()
 
     def last_quote(self, code: str) -> Optional[sqlite3.Row]:
         return self.conn.execute(
@@ -128,9 +156,13 @@ class Storage:
                 datetime.now().isoformat(timespec="seconds"),
             ),
         )
+
+    def commit(self) -> None:
+        """把本轮累积的写入落盘（默认延迟到每轮结束时统一提交）。"""
         self.conn.commit()
 
     def close(self) -> None:
+        self.conn.commit()
         self.conn.close()
 
     def __enter__(self) -> "Storage":

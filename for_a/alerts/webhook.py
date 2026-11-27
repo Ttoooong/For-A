@@ -18,7 +18,7 @@ from .base import Alerter
 
 logger = logging.getLogger(__name__)
 
-_LEVEL_EMOJI = {"info": "��", "warning": "��", "critical": "��"}
+_LEVEL_EMOJI = {"info": "ℹ️", "warning": "⚠️", "critical": "🔴"}
 
 
 def _lark_sign(timestamp: int, secret: str) -> str:
@@ -45,7 +45,7 @@ class WebhookAlerter(Alerter):
         kind = self.config.type
         lines = []
         for alert in alerts:
-            emoji = _LEVEL_EMOJI.get(alert.level, "��")
+            emoji = _LEVEL_EMOJI.get(alert.level, "ℹ️")
             lines.append(f"{emoji} {alert.message}")
         text = "\n".join(lines)
 

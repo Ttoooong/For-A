@@ -6,13 +6,14 @@
 * ``POST /new/information/topSearch/query`` —— 证券代码 -> ``orgId``
 * ``POST /new/hisAnnouncement/query`` —— 公告列表（支持按 ``代码,orgId`` 精确过滤）
 
-注意：``seDate`` 参数在当前版本会导致返回 0 条，因此改为拉取后在本地按时间过滤。
+注意：``seDate`` 参数在当前版本会导致返回 0 条，因此改为拉取后在本地按时间过滤
+（``fetch_recent`` 默认只保留最近 7 天）。
 """
 
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 
 from ..http import HttpClient
@@ -28,6 +29,17 @@ STATIC_ENDPOINT = "https://static.cninfo.com.cn/"
 
 # 交易所 -> 巨潮 column 取值
 _COLUMN_BY_MARKET = {"SH": "sse", "SZ": "szse", "BJ": "bj"}
+
+# 默认只保留最近 N 天的公告（seDate 不可用时的本地兜底过滤）
+DEFAULT_MAX_AGE_DAYS = 7
+
+
+def _recent(announcements: List[Announcement], max_age_days: int) -> List[Announcement]:
+    """丢掉 ``max_age_days`` 之前的公告。"""
+    if not max_age_days:
+        return announcements
+    cutoff = datetime.now() - timedelta(days=max_age_days)
+    return [ann for ann in announcements if ann.publish_time >= cutoff]
 
 
 class CninfoSource(QuoteSource):
@@ -84,8 +96,17 @@ class CninfoSource(QuoteSource):
             return []
         return payload.get("announcements") or []
 
-    def fetch(self, codes: List[str], page_size: int = 20) -> Dict[str, List[Announcement]]:
-        """按证券代码拉取公告。返回 ``{code: [Announcement, ...]}``。"""
+    def fetch(
+        self,
+        codes: List[str],
+        page_size: int = 20,
+        max_age_days: int = 0,
+    ) -> Dict[str, List[Announcement]]:
+        """按证券代码拉取公告。返回 ``{code: [Announcement, ...]}``。
+
+        ``max_age_days=0`` 表示不过滤——按代码查询是用户明确指定的，应把该股票
+        的公告都列出来，不该被时间窗截断。
+        """
         result: Dict[str, List[Announcement]] = {}
         for code in codes:
             digits, market = split_code(code)
@@ -118,11 +139,14 @@ class CninfoSource(QuoteSource):
                         source="cninfo",
                     )
                 )
+            announcements = _recent(announcements, max_age_days)
             if announcements:
                 result[code] = announcements
         return result
 
-    def fetch_recent(self, page_size: int = 30) -> List[Announcement]:
+    def fetch_recent(
+        self, page_size: int = 30, max_age_days: int = DEFAULT_MAX_AGE_DAYS
+    ) -> List[Announcement]:
         """拉取全市场最新公告（沪 + 深）。"""
         items: List[dict] = []
         for column in ("sse", "szse"):
@@ -152,4 +176,4 @@ class CninfoSource(QuoteSource):
                 )
             )
         announcements.sort(key=lambda a: a.publish_time, reverse=True)
-        return announcements
+        return _recent(announcements, max_age_days)

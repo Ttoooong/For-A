@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import yaml
+
+from .models import SymbolError, normalize_code
 
 DEFAULT_ANNOUNCEMENT_KEYWORDS = [
     "重组",
@@ -26,6 +28,21 @@ DEFAULT_ANNOUNCEMENT_KEYWORDS = [
     "中标",
     "业绩说明会",
 ]
+
+
+def _normalize_watchlist(items: List[Any]) -> List[str]:
+    """把自选股代码归一化成 ``600519.SH`` 形式。
+
+    YAML 会把 ``000001`` 解析成整数 1（丢掉前导零），所以这里**保留原始类型**
+    交给 :func:`normalize_code` 按 6 位补零还原，而不是先转成字符串。
+    """
+    codes: List[str] = []
+    for item in items:
+        try:
+            codes.append(normalize_code(item))
+        except SymbolError as exc:
+            raise SymbolError(f"自选股代码非法: {item!r}（{exc}）") from exc
+    return codes
 
 
 @dataclass
@@ -99,6 +116,17 @@ class WebhookConfig:
     env_secret: str = ""
 
 
+def resolve_webhook(hook: WebhookConfig) -> Tuple[str, str]:
+    """返回 ``(url, secret)``，环境变量优先于配置文件。"""
+    url = hook.url
+    secret = hook.secret
+    if hook.env_url:
+        url = os.environ.get(hook.env_url, url)
+    if hook.env_secret:
+        secret = os.environ.get(hook.env_secret, secret)
+    return url, secret
+
+
 @dataclass
 class AlertChannelConfig:
     type: str = "console"
@@ -118,6 +146,10 @@ class Config:
     poll: PollConfig = field(default_factory=PollConfig)
     alerts: List[AlertChannelConfig] = field(default_factory=lambda: [AlertChannelConfig()])
     storage: StorageConfig = field(default_factory=StorageConfig)
+
+    def __post_init__(self) -> None:
+        """自选股代码在构造时统一归一化，之后各处都拿到 ``600519.SH`` 形式。"""
+        self.watchlist = _normalize_watchlist(self.watchlist)
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "Config":
@@ -147,7 +179,7 @@ class Config:
             alert_channels = [AlertChannelConfig()]
 
         return cls(
-            watchlist=[str(item) for item in (data.get("watchlist") or [])],
+            watchlist=list(data.get("watchlist") or []),
             sources=SourcesConfig(
                 primary=sources.get("primary", "eastmoney"),
                 verify=list(sources.get("verify") or ["tencent", "sina"]),
@@ -203,16 +235,6 @@ class Config:
             storage=StorageConfig(path=storage.get("path", "for_a.db")),
         )
 
-    def resolve_webhook(self, hook: WebhookConfig) -> tuple[str, str]:
-        """返回 (url, secret)，环境变量优先于配置文件。"""
-        url = hook.url
-        secret = hook.secret
-        if hook.env_url:
-            url = os.environ.get(hook.env_url, url)
-        if hook.env_secret:
-            secret = os.environ.get(hook.env_secret, secret)
-        return url, secret
-
 
 def load_config(path: Optional[str]) -> Config:
     """从 YAML 文件加载配置；``path`` 为空时返回默认配置。"""
@@ -221,5 +243,8 @@ def load_config(path: Optional[str]) -> Config:
     if not os.path.exists(path):
         raise FileNotFoundError(f"配置文件不存在: {path}")
     with open(path, "r", encoding="utf-8") as fp:
-        data = yaml.safe_load(fp) or {}
+        try:
+            data = yaml.safe_load(fp) or {}
+        except yaml.YAMLError as exc:
+            raise ValueError(f"配置文件格式有误: {path}（{exc}）") from exc
     return Config.from_dict(data)

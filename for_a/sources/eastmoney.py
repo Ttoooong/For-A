@@ -7,8 +7,10 @@
 from __future__ import annotations
 
 import logging
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
-from typing import Dict, List
+from typing import Dict, List, Sequence, Set
 
 from ..http import HttpClient
 from ..models import Quote, eastmoney_secid
@@ -72,7 +74,11 @@ _RATIO_FIELDS = {
 
 
 def parse_eastmoney_payload(payload: dict, fallback_code: str) -> Quote | None:
-    """把 ``push2`` 的 JSON 响应转成 :class:`Quote`。"""
+    """把 ``push2`` 的 JSON 响应转成 :class:`Quote`。
+
+    报文缺失关键字段时返回 ``None``：宁可判定为无效，也不要产出全 0 的快照
+    污染 ``quotes`` 基线、触发假的涨跌告警。
+    """
     data = payload.get("data")
     if not isinstance(data, dict):
         return None
@@ -91,7 +97,15 @@ def parse_eastmoney_payload(payload: dict, fallback_code: str) -> Quote | None:
         except (TypeError, ValueError):
             return 0.0
 
+    price = scaled("f43")
+    if price <= 0:
+        return None
+
     digits = str(data.get("f57") or fallback_code.split(".")[0])
+    expected = fallback_code.split(".")[0]
+    if digits != expected:
+        # 报文与请求对不上：镜像在高频访问下偶尔会返回字段错位的内容
+        return None
     market = fallback_code.split(".")[-1].upper()
     quote_time = None
     ts = data.get("f86")
@@ -104,7 +118,7 @@ def parse_eastmoney_payload(payload: dict, fallback_code: str) -> Quote | None:
     return Quote(
         code=f"{digits}.{market}",
         name=str(data.get("f58") or ""),
-        price=scaled("f43"),
+        price=price,
         prev_close=scaled("f60"),
         open=scaled("f46"),
         high=scaled("f44"),
@@ -131,12 +145,38 @@ class EastmoneySource(QuoteSource):
     def __init__(self, client: HttpClient, hosts: tuple[str, ...] = HOSTS) -> None:
         self.client = client
         self.hosts = list(hosts)
+        self._dead_hosts: Set[str] = set()
+        self._failures: Dict[str, int] = {}
+        self._dead_lock = threading.Lock()
+
+    # ---------- 镜像池 ----------
+
+    def _mark_failure(self, host: str) -> None:
+        """记录一次连接失败；连续失败才把镜像踢出本轮池子。
+
+        单次超时多半是网络抖动，直接拉黑会让可用镜像白白损失。
+        """
+        with self._dead_lock:
+            self._failures[host] = self._failures.get(host, 0) + 1
+            if self._failures[host] >= 2:
+                self._dead_hosts.add(host)
+                logger.warning("东财镜像 %s 连续失败，本轮不再使用", host)
+
+    def _active_hosts(self) -> List[str]:
+        with self._dead_lock:
+            alive = [host for host in self.hosts if host not in self._dead_hosts]
+        return alive or list(self.hosts)
 
     def _get(self, code: str) -> dict:
-        """按镜像顺序重试，直到某一台返回可解析的 JSON。"""
+        """按镜像顺序重试，直到某一台返回可校验的 JSON。
+
+        校验三件事：``data`` 是非空 dict、返回的代码与请求一致、最新价有效。
+        镜像在高频访问下偶尔会返回字段错位的报文，不校验就会污染数据。
+        """
         params = {"secid": eastmoney_secid(code), "fields": FIELDS}
+        expected = code.split(".")[0]
         last_error: Exception | None = None
-        for host in self.hosts:
+        for host in self._active_hosts():
             try:
                 payload = self.client.get_json(
                     f"{host}{ENDPOINT}",
@@ -146,16 +186,84 @@ class EastmoneySource(QuoteSource):
             except Exception as exc:  # noqa: BLE001
                 last_error = exc
                 logger.warning("东财镜像 %s 请求失败: %s", host, exc)
+                self._mark_failure(host)
                 continue
-            if payload.get("data"):
-                return payload
-            last_error = RuntimeError(f"{host} 返回空 data")
+            data = payload.get("data")
+            if not isinstance(data, dict) or not data:
+                last_error = RuntimeError(f"{host} 返回空 data")
+                continue
+            returned = str(data.get("f57") or "")
+            if returned != expected:
+                last_error = RuntimeError(f"{host} 返回代码 {returned}，与请求 {expected} 不符")
+                logger.warning("东财镜像 %s 报文代码不匹配: %s != %s", host, returned, expected)
+                continue
+            try:
+                price = float(data.get("f43")) / 100.0
+            except (TypeError, ValueError):
+                price = 0.0
+            if price <= 0:
+                last_error = RuntimeError(f"{host} 返回的最新价无效")
+                continue
+            return payload
         raise RuntimeError(f"东财所有镜像均失败: {last_error}")
 
-    def fetch(self, codes: List[str]) -> Dict[str, Quote]:
+    def _fetch_shard(self, codes: Sequence[str]) -> Dict[str, Quote]:
+        """取一个分片的行情。单个代码失败不影响同分片的其它代码。"""
         result: Dict[str, Quote] = {}
         for code in codes:
-            quote = parse_eastmoney_payload(self._get(code), code)
+            try:
+                payload = self._get(code)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("东财取数失败 %s: %s", code, exc)
+                continue
+            quote = parse_eastmoney_payload(payload, code)
             if quote is not None:
                 result[quote.code] = quote
+        return result
+
+    def fetch(self, codes: List[str]) -> Dict[str, Quote]:
+        """批量拉取行情。
+
+        代码按镜像分片后并发取数——东财的批量端点不可用，逐代码串行的墙钟时间
+        会随自选股数量线性增长，把轮询间隔吃光。
+        """
+        if not codes or not self.hosts:
+            return {}
+
+        # 熔断状态按轮重置：某个镜像只是这一轮挂了，不该永久下线
+        with self._dead_lock:
+            self._dead_hosts.clear()
+            self._failures.clear()
+
+        shards: List[List[str]] = [[] for _ in self.hosts]
+        for index, code in enumerate(codes):
+            shards[index % len(self.hosts)].append(code)
+
+        result: Dict[str, Quote] = {}
+        workers = min(len(self.hosts), len(codes))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {
+                pool.submit(self._fetch_shard, shard): shard
+                for shard in shards
+                if shard
+            }
+            for future in as_completed(futures):
+                try:
+                    result.update(future.result())
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("东财分片失败: %s", exc)
+
+        if not result:
+            # 某些网络环境（如限制并发的代理）会掐掉并发连接，这时退回串行，
+            # 宁可慢一点也不能丢覆盖
+            logger.warning("东财并发取数未取到数据，回退串行")
+            for code in codes:
+                try:
+                    payload = self._get(code)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("东财取数失败 %s: %s", code, exc)
+                    continue
+                quote = parse_eastmoney_payload(payload, code)
+                if quote is not None:
+                    result[quote.code] = quote
         return result
