@@ -1,0 +1,15 @@
+{
+  "name": "for-a-web",
+  "version": "1.0.0",
+  "private": true,
+  "description": "For-A A股信息监控平台 Web 服务",
+  "type": "module",
+  "main": "server.js",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node server.js"
+  },
+  "license": "MIT"
+}
