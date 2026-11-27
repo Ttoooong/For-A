@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>For-A · A股信息监控台</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%230b1220'/%3E%3Cpath d='M8 22l5-7 4 4 7-10' stroke='%2334d399' stroke-width='2.5' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E" />
+    <link rel="stylesheet" href="/styles.css" />
+    <link rel="stylesheet" href="/search.css" />
+  </head>
+  <body>
+    <div class="shell">
+      <header class="topbar">
+        <div class="brand">
+          <span class="mark" aria-hidden="true">
+            <svg viewBox="0 0 32 32" width="32" height="32">
+              <rect width="32" height="32" rx="9" fill="url(#g)" />
+              <defs>
+                <linearGradient id="g" x1="0" y1="0" x2="32" y2="32">
+                  <stop offset="0" stop-color="#2563eb" />
+                  <stop offset="1" stop-color="#0ea5e9" />
+                </linearGradient>
+              </defs>
+              <path d="M7 23l6-8 4 4 8-11" stroke="#eaf2ff" stroke-width="2.6" fill="none" stroke-linecap="round" stroke-linejoin="round" />
+            </svg>
+          </span>
+          <div>
+            <h1>For-A 信息监控台</h1>
+            <p>多源行情交叉校验 · 规则引擎告警</p>
+          </div>
+        </div>
+        <div class="topbar-meta">
+          <span class="pill" id="conn-pill"><i class="dot"></i><span id="conn-text">连接中</span></span>
+          <span class="stamp">最近更新 <b id="last-update">—</b></span>
+          <button id="refresh" class="ghost-btn" type="button">刷新</button>
+        </div>
+      </header>
+
+      <section class="stats" id="stats">
+        <article class="stat">
+          <span class="stat-label">监控标的</span>
+          <strong class="stat-value" id="stat-count">—</strong>
+          <span class="stat-hint" id="stat-count-hint">自选股</span>
+        </article>
+        <article class="stat">
+          <span class="stat-label">活跃告警</span>
+          <strong class="stat-value" id="stat-alerts">—</strong>
+          <span class="stat-hint" id="stat-alerts-hint">等待数据</span>
+        </article>
+        <article class="stat">
+          <span class="stat-label">上涨 / 下跌</span>
+          <strong class="stat-value" id="stat-breadth">—</strong>
+          <span class="stat-hint">最新价对比昨收</span>
+        </article>
+        <article class="stat">
+          <span class="stat-label">数据源在线</span>
+          <strong class="stat-value" id="stat-sources">—</strong>
+          <span class="stat-hint" id="stat-sources-hint">主源 + 校验源</span>
+        </article>
+      </section>
+
+      <main class="grid">
+        <section class="panel panel-wide">
+          <div class="panel-head">
+            <h2>自选股行情</h2>
+            <div class="panel-tools">
+              <div class="search-wrap">
+                <input
+                  id="search-input"
+                  class="search-input"
+                  type="search"
+                  placeholder="搜索代码 / 名称，如 茅台、600519、宁德"
+                  autocomplete="off"
+                  spellcheck="false"
+                />
+                <div class="search-results" id="search-results" hidden></div>
+              </div>
+              <span class="tag" id="quote-count">0 项</span>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th class="col-name">名称 / 代码</th>
+                  <th class="num">最新价</th>
+                  <th class="num">涨跌幅</th>
+                  <th class="num">涨跌额</th>
+                  <th class="num">成交量(手)</th>
+                  <th class="num">成交额</th>
+                  <th class="num">换手率</th>
+                  <th class="num">振幅</th>
+                  <th class="num">多源校验</th>
+                  <th class="col-op">操作</th>
+                </tr>
+              </thead>
+              <tbody id="quote-body">
+                <tr class="empty-row">
+                  <td colspan="10">正在加载行情数据…</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <h2>告警流</h2>
+            <span class="tag" id="alert-count">0 条</span>
+          </div>
+          <ul class="feed" id="alert-feed">
+            <li class="feed-empty">暂无告警</li>
+          </ul>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <h2>公告动态</h2>
+            <span class="tag" id="announcement-count">0 条</span>
+          </div>
+          <ul class="feed" id="announcement-feed">
+            <li class="feed-empty">暂无公告</li>
+          </ul>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <h2>数据源健康度</h2>
+            <span class="tag">六道闸门 · 交叉校验</span>
+          </div>
+          <ul class="source-list" id="source-list">
+            <li class="feed-empty">等待首次采样</li>
+          </ul>
+        </section>
+      </main>
+
+      <footer class="footer">
+        <span>行情数据来自腾讯 / 新浪 / 东方财富公开接口，公告来自巨潮资讯网。</span>
+        <span>本平台仅用于数据采集与技术研究，不构成任何投资建议。</span>
+      </footer>
+    </div>
+
+    <div class="toast" id="toast"></div>
+
+    <script id="bootstrap" type="application/json">__BOOTSTRAP__</script>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

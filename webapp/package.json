@@ -1,0 +1,13 @@
+{
+  "name": "for-a-webapp",
+  "version": "1.1.0",
+  "private": true,
+  "type": "module",
+  "description": "For-A A股信息监控台 Web 版：多源行情交叉校验 + 搜索自选 + 规则引擎告警",
+  "scripts": {
+    "start": "node src/server.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
