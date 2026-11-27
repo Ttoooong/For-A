@@ -1,0 +1,8 @@
+requests>=2.31.0
+PyYAML>=6.0
+
+# 可选：通达信协议层（tick 级分笔/盘口）
+# pip install pytdx
+
+# 可选：开发测试
+# pip install pytest

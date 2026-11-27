@@ -1,0 +1,80 @@
+# For-A 配置示例。复制为 config.yaml 后按需修改。
+
+# 自选股。写法支持 600519 / sh600519 / 600519.SH
+# 注意：YAML 会把 000001 解析成整数，务必加引号
+watchlist:
+  - "600519"
+  - "000001"
+  - "300750"
+  - "688981"
+
+sources:
+  # 主源：决定以哪一路数据为准
+  primary: eastmoney
+  # 校验源：与主源交叉比对，分歧超阈值会告警
+  verify:
+    - tencent
+    - sina
+  # 同一域名的最小请求间隔（秒）。东财连续重试会被限流，别调太小
+  min_interval: 0.5
+  timeout: 10
+  retries: 3
+  # 价格分歧容忍度，超过则触发 divergence 告警
+  divergence_tolerance: 0.005
+
+rules:
+  price_change:
+    enabled: true
+    threshold_pct: 5.0     # 涨跌幅绝对值超过 5% 触发
+    level: warning
+  limit:
+    enabled: true          # 触及涨跌停
+    level: critical
+  turnover:
+    enabled: true
+    threshold_pct: 10.0    # 换手率超过 10%
+    level: info
+  volume_surge:
+    enabled: true
+    ratio: 3.0             # 成交量较上次采样放大 3 倍
+    min_seconds: 60        # 两次采样间隔下限，避免刚启动就误报
+    level: warning
+  announcement:
+    enabled: true
+    page_size: 30
+    level: info
+    keywords:
+      - 重组
+      - 停牌
+      - 复牌
+      - 立案
+      - 处罚
+      - 问询函
+      - 关注函
+      - 业绩预增
+      - 业绩预亏
+      - 减持
+      - 增持
+      - 回购
+      - 质押
+      - 重大资产
+      - 中标
+
+poll:
+  interval_seconds: 15
+  announcement_interval_seconds: 300
+
+alerts:
+  - type: console
+  - type: webhook
+    webhook:
+      # type: lark | dingtalk | wecom | generic
+      type: lark
+      url: ""
+      # 密钥建议走环境变量，不要写进仓库
+      secret: ""
+      env_url: FORA_LARK_WEBHOOK_URL
+      env_secret: FORA_LARK_SIGN_SECRET
+
+storage:
+  path: for_a.db
